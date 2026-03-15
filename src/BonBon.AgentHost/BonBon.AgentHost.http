@@ -1,0 +1,6 @@
+@BonBon.AgentHost_HostAddress = http://localhost:5253
+
+GET {{BonBon.AgentHost_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
