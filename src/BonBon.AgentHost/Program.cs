@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
 using System.ComponentModel;
 using System.Net.Http.Json;
 
@@ -21,6 +22,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 options.Audience = "BonbonShop";
             });
 
+
 builder.Services.AddHttpClient("McpServer", client => 
 {
     var mcpUrl = builder.Configuration["MCP_INVENTORY_URL"] ?? "http://localhost:5243";
@@ -36,18 +38,13 @@ kernelBuilder.Plugins.AddFromType<CreateOrderPlugin>();
 
 if (builder.Environment.IsDevelopment())
 {
-    // MÔI TRƯỜNG DEVELOPMENT: Sử dụng Local LLM thông qua container Ollama của Aspire
-    // URL sẽ do Aspire tiêm vào qua tên service 'ollama' (tức http://ollama:11434/v1)
-    // Hoặc ta có thể cấu hình Endpoint giả lập local
-
-       // Nếu dùng Aspire Ollama Container thay vì tự chạy ngoài
     var ollamaAspireUrl = builder.Configuration["services:ollama:http:0"] ?? "http://localhost:11434/v1"; 
-
+    // RUN ollama run qwen3.5:9b
     kernelBuilder.AddOpenAIChatCompletion(
-        modelId: aiSettings["LocalModelId"] ?? "qwen3.5",
+        modelId: aiSettings["LocalModelId"] ?? "qwen3.5:9b",
         apiKey: "lm-studio",
         endpoint: new Uri(ollamaAspireUrl),
-        httpClient: new HttpClient { Timeout = TimeSpan.FromMinutes(5) }
+        httpClient: new HttpClient { Timeout = TimeSpan.FromMinutes(15) }
     );
 
 }
@@ -116,22 +113,31 @@ Trước mỗi hành động, hãy tự trả lời ngầm:
 
 app.MapPost("/api/agent/chat", async (string prompt, Kernel kernel) =>
 {
-    // Bật Function Calling tự động để Kernel tự liên lạc biến tool/MCP
-    var settings = new PromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
-    
+    // 1. Lấy dịch vụ Chat Completion từ Kernel
+    var chatCompletionService = kernel.GetRequiredService<IChatCompletionService>();
+
+    // 2. Cấu hình để AI tự động gọi Tool (Function Calling)
+    OpenAIPromptExecutionSettings settings = new() 
+    { 
+        FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() 
+    };
+
+    // 3. Thêm tin nhắn mới của người dùng vào lịch sử (ChatHistory)
     chatHistory.AddUserMessage(prompt);
 
-    Console.WriteLine("=== New User Message ===");
-    Console.WriteLine(prompt);
-    Console.WriteLine("========================");
-    // Gọi LLM
-    var response = await kernel.InvokePromptAsync(prompt, new(settings));
+    // 4. Gọi LLM với đầy đủ lịch sử và các Plugin đã đăng ký trong Kernel
+    // Lưu ý: Phải truyền 'kernel' vào để AI có thể tìm thấy và thực thi các Plugin
+    var response = await chatCompletionService.GetChatMessageContentAsync(
+        chatHistory,
+        executionSettings: settings,
+        kernel: kernel
+    );
 
-    Console.WriteLine("=== Agent Response ===");
-    Console.WriteLine(response);
-    Console.WriteLine("======================");
+    // 5. Quan trọng: Lưu phản hồi của AI vào lịch sử để lần chat sau nó nhớ nội dung này
+    chatHistory.Add(response);
 
-    return Results.Ok(new { Response = response.GetValue<string>() });
+    // 6. Trả kết quả về cho Client
+    return Results.Ok(new { Response = response.Content });
 })
 .WithName("ChatWithAgent")
 .WithOpenApi();
